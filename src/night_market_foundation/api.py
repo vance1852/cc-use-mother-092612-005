@@ -9,8 +9,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .errors import DomainError, ValidationError
+from .plaques import PlaqueService
 from .service import DomainService
 from .storage import Database
+
+
+def _plaque_service(service: DomainService) -> PlaqueService:
+    return PlaqueService(service.database, service.clock)
 
 
 def route(service: DomainService, method: str, path: str, body: dict[str, Any] | None,
@@ -48,6 +53,61 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
             query = parse_qs(parsed.query)
             after = int(query.get("after_sequence", ["0"])[0])
             return 200, {"items": service.audit_events(after)}
+
+        plaques = _plaque_service(service)
+        query = parse_qs(parsed.query)
+
+        if method == "POST" and parsed.path == "/plaques":
+            result = plaques.register_plaque(actor_id=actor_id, **body)
+            return 200 if result.get("replayed") else 201, result
+        if method == "POST" and parsed.path == "/plaques/deploy":
+            result = plaques.deploy_plaque(actor_id=actor_id, **body)
+            return 200 if result.get("replayed") else 201, result
+        if method == "POST" and parsed.path == "/relocations":
+            result = plaques.request_relocation(actor_id=actor_id, **body)
+            return 200 if result.get("replayed") else 201, result
+        if method == "POST" and parsed.path == "/relocations/handover":
+            return 200, plaques.handover_relocation(actor_id=actor_id, **body)
+        if method == "POST" and parsed.path == "/relocations/cancel":
+            return 200, plaques.cancel_relocation(actor_id=actor_id, **body)
+        if method == "POST" and parsed.path == "/scans/upload":
+            report = plaques.upload_scans(**body)
+            return 202, {"accepted": report.accepted, "replayed": report.replayed,
+                         "forked": report.forked,
+                         "results": [item.__dict__ for item in report.results]}
+        if method == "GET" and parsed.path == "/plaques/position":
+            plaque_id = query.get("plaque_id", [""])[0]
+            if not plaque_id:
+                raise ValidationError("plaque_id 不能为空")
+            return 200, plaques.plaque_position(plaque_id).__dict__
+        if method == "GET" and parsed.path == "/deployments":
+            deployment_id = query.get("deployment_id", [""])[0]
+            if not deployment_id:
+                raise ValidationError("deployment_id 不能为空")
+            return 200, plaques.content_summary(deployment_id)
+        if method == "GET" and parsed.path == "/inspection-queue":
+            site_id = query.get("site_id", [""])[0]
+            if not site_id:
+                raise ValidationError("site_id 不能为空")
+            kind = query.get("kind", [None])[0]
+            status = query.get("status", [None])[0]
+            items = plaques.list_inspection_queue(site_id=site_id, kind=kind, status=status)
+            return 200, {"items": [item.__dict__ for item in items]}
+        if method == "POST" and parsed.path == "/inspection-cases/claim":
+            return 200, plaques.claim_case(actor_id=actor_id, **body)
+        if method == "POST" and parsed.path == "/inspection-cases/resolve":
+            return 200, plaques.resolve_case(actor_id=actor_id, **body)
+        if method == "GET" and parsed.path == "/inspection-cases/supplements":
+            case_id = query.get("case_id", [""])[0]
+            if not case_id:
+                raise ValidationError("case_id 不能为空")
+            return 200, {"items": plaques.list_supplements(case_id)}
+        if method == "GET" and parsed.path == "/statistics/anonymous":
+            site_id = query.get("site_id", [""])[0]
+            if not site_id:
+                raise ValidationError("site_id 不能为空")
+            return 200, plaques.anonymous_statistics(site_id=site_id,
+                                                     day=query.get("day", [None])[0])
         return 404, {"error": "route_not_found", "message": "接口不存在"}
     except DomainError as exc:
         return exc.status, {"error": exc.code, "message": str(exc)}
